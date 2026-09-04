@@ -1,9 +1,8 @@
-
 import streamlit as st
 import torch
 import torch.nn as nn
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageStat
 import torchvision.transforms as transforms
 import timm
 import os
@@ -14,6 +13,7 @@ from io import BytesIO
 import random
 from huggingface_hub import hf_hub_download
 import json
+from transformers import BlipProcessor, BlipForConditionalGeneration
 
 # Set page config first
 st.set_page_config(page_title="🐄 Cattle Breed Identifier", layout="centered", initial_sidebar_state="collapsed")
@@ -461,7 +461,7 @@ def load_model():
 
             # Create ResNet-50 with 40 output classes
             model = timm.create_model(
-                "convnext_tiny",
+                "resnet50",
                 pretrained=False,
                 num_classes=len(breed_labels)
             )
@@ -505,24 +505,117 @@ def load_model():
 
 model = load_model()
 
+# ============ CAPTIONING MODEL LOADING ============
+@st.cache_resource
+def load_caption_model():
+    try:
+        processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+        caption_model = BlipForConditionalGeneration.from_pretrained(
+            "Salesforce/blip-image-captioning-base"
+        ).to(device)
+        caption_model.eval()
+        return processor, caption_model
+    except Exception:
+        return None, None
+
+caption_processor, caption_model = load_caption_model()
+
 # ============ PREDICTION FUNCTIONS ============
 def predict_breed(image):
-    try:
-        image = transform(image).unsqueeze(0).to(device)
-        with torch.no_grad():
-            outputs = model(image)
-            probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
-            confidence, predicted_idx = torch.max(probabilities, 0)
-            predicted_label = breed_labels[predicted_idx.item()]
-            confidence_percent = confidence.item() * 100
-        return predicted_label, confidence_percent
-    except Exception as e:
+    """Kept for backward compatibility: returns only the top-1 prediction."""
+    top_results = predict_breed_topk(image, k=1)
+    if not top_results:
         return None, 0
+    return top_results[0]
+
+def predict_breed_topk(image, k=3):
+    """Returns a list of (label, confidence_percent) tuples for the top-k classes."""
+    try:
+        k = min(k, len(breed_labels))
+        img_tensor = transform(image).unsqueeze(0).to(device)
+        with torch.no_grad():
+            outputs = model(img_tensor)
+            probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+            top_probs, top_idxs = torch.topk(probabilities, k)
+        results = [
+            (breed_labels[idx.item()], prob.item() * 100)
+            for prob, idx in zip(top_probs, top_idxs)
+        ]
+        return results
+    except Exception:
+        return []
 
 def demo_predict(image):
     breed = random.choice(breed_labels)
     confidence = random.uniform(65, 90)
     return breed, confidence
+
+def demo_predict_topk(image, k=3):
+    picks = random.sample(breed_labels, min(k, len(breed_labels)))
+    confidences = sorted([random.uniform(30, 90) for _ in picks], reverse=True)
+    return list(zip(picks, confidences))
+
+# ============ IMAGE CONTENT REPORT ============
+def analyze_image_quality(image):
+    """Lightweight, model-free visual analysis of the uploaded image."""
+    try:
+        width, height = image.size
+        gray = image.convert("L")
+
+        stat = ImageStat.Stat(gray)
+        brightness = stat.mean[0]          # 0 (dark) - 255 (bright)
+        contrast = stat.stddev[0]          # low = flat/washed out, high = high contrast
+
+        # Simple sharpness estimate: variance of a Laplacian-like gradient
+        arr = np.asarray(gray, dtype=np.float32)
+        gy, gx = np.gradient(arr)
+        sharpness = float((gx ** 2 + gy ** 2).mean())
+
+        # Dominant colors (on a downscaled copy for speed)
+        small = image.convert("RGB").resize((100, 100))
+        color_counts = small.getcolors(maxcolors=100 * 100)
+        color_counts.sort(reverse=True, key=lambda c: c[0])
+        dominant_colors = [f"rgb{c[1]}" for c in color_counts[:3]]
+
+        # Human-readable quality flags
+        notes = []
+        if brightness < 60:
+            notes.append("image looks quite dark")
+        elif brightness > 200:
+            notes.append("image looks overexposed / very bright")
+        if contrast < 30:
+            notes.append("low contrast, details may be hard to see")
+        if sharpness < 50:
+            notes.append("image may be blurry or out of focus")
+        if min(width, height) < 224:
+            notes.append("resolution is low, which can reduce prediction accuracy")
+        if not notes:
+            notes.append("good overall image quality for analysis")
+
+        return {
+            "width": width,
+            "height": height,
+            "brightness": round(brightness, 1),
+            "contrast": round(contrast, 1),
+            "sharpness": round(sharpness, 1),
+            "dominant_colors": dominant_colors,
+            "notes": notes,
+        }
+    except Exception:
+        return None
+
+def generate_caption(image):
+    """AI-generated natural-language description of the image contents."""
+    if caption_model is None or caption_processor is None:
+        return None
+    try:
+        inputs = caption_processor(image.convert("RGB"), return_tensors="pt").to(device)
+        with torch.no_grad():
+            out = caption_model.generate(**inputs, max_new_tokens=40)
+        caption = caption_processor.decode(out[0], skip_special_tokens=True)
+        return caption.strip().capitalize()
+    except Exception:
+        return None
 
 def save_to_csv(breed, confidence, filename, timestamp):
     try:
@@ -642,18 +735,51 @@ if st.session_state.current_page == "main":
 
             with st.spinner(get_translation("analyzing", language)):
                 if model is not None:
-                    breed, confidence = predict_breed(image)
+                    top_predictions = predict_breed_topk(image, k=3)
                 else:
-                    breed, confidence = demo_predict(image)
+                    top_predictions = demo_predict_topk(image, k=3)
                     st.info(get_translation("demo_mode", language))
 
-            if breed:
+                with st.spinner("📝 Generating image report..."):
+                    caption = generate_caption(image)
+                    quality_report = analyze_image_quality(image)
+
+            if top_predictions:
+                breed, confidence = top_predictions[0]
+
                 st.markdown(f"""
                 <div class="prediction-box">
                     <p style="font-weight: bold; font-size: 1.5rem;">{get_translation("predicted_breed", language)} <b>{breed}</b></p>
                     <p style="font-weight: bold; font-size: 1.2rem; color: #3498db;">{get_translation("confidence", language)}: {confidence:.2f}%</p>
                 </div>
                 """, unsafe_allow_html=True)
+
+                # ---- Top-3 confidence report ----
+                st.subheader("🏆 Top 3 Predicted Breeds")
+                for rank, (label, conf) in enumerate(top_predictions, start=1):
+                    st.markdown(f"**{rank}. {label}** — {conf:.2f}%")
+                    st.progress(min(int(conf), 100))
+
+                # ---- Image content report ----
+                st.subheader("🖼️ Image Content Report")
+
+                if caption:
+                    st.markdown(f"**Description:** {caption}")
+                else:
+                    st.caption("Image caption unavailable (captioning model failed to load).")
+
+                if quality_report:
+                    qc1, qc2, qc3 = st.columns(3)
+                    qc1.metric("Resolution", f"{quality_report['width']}×{quality_report['height']}")
+                    qc2.metric("Brightness", quality_report["brightness"])
+                    qc3.metric("Sharpness", quality_report["sharpness"])
+
+                    st.markdown(
+                        "**Dominant colors:** " + ", ".join(quality_report["dominant_colors"])
+                    )
+                    st.markdown(
+                        "**Notes:** " + "; ".join(quality_report["notes"]).capitalize() + "."
+                    )
 
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 save_to_csv(breed, f"{confidence:.2f}%", uploaded_file.name, timestamp)
