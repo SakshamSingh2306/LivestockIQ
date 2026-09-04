@@ -187,7 +187,7 @@ def set_custom_style():
         """
         <style>
         .stApp {
-            background: url('https://images.unsplash.com/photo-1527153857715-3908f2bae5e8?ixlib=rb-4.0.3&auto=format&fit=crop&w=2089&q=80');
+            background: url('https://www.google.com/url?sa=t&source=web&rct=j&url=https%3A%2F%2Fwallpaperaccess.com%2Fsolid-white&opi=89978449');
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
