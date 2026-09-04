@@ -8,3 +8,4 @@ requests
 pandas
 gTTS
 huggingface_hub
+transformers
