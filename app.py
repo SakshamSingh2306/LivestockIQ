@@ -12,6 +12,7 @@ import pandas as pd
 from datetime import datetime
 from io import BytesIO
 import random
+from huggingface_hub import hf_hub_download
 
 # Set page config first
 st.set_page_config(page_title="🐄 Cattle Breed Identifier", layout="centered", initial_sidebar_state="collapsed")
@@ -425,7 +426,10 @@ def load_model():
     try:
         with st.spinner(get_translation("model_loading", language)):
             model = timm.create_model("resnet50", pretrained=False, num_classes=len(breed_labels))
-            checkpoint_path = "best_resnet50_indian_bovine_breeds.pth"
+            checkpoint_path = hf_hub_download(
+                repo_id="ujjwal75/indian-bovine-breeds-model",
+                filename="Indian_bovine_finetuned_model.pth"
+            )
             
             if not os.path.exists(checkpoint_path):
                 st.warning(get_translation("model_error", language))
