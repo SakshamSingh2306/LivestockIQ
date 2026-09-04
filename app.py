@@ -13,6 +13,7 @@ from datetime import datetime
 from io import BytesIO
 import random
 from huggingface_hub import hf_hub_download
+import json
 
 # Set page config first
 st.set_page_config(page_title="🐄 Cattle Breed Identifier", layout="centered", initial_sidebar_state="collapsed")
@@ -268,18 +269,41 @@ language = language_selector()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # ============ BREED LABELS ============
-breed_labels = [
-    "Alambadi", "Amritmahal", "Ayrshire", "Banni", "Bargur", 
-    "Bhadawari", "Brown_Swiss", "Dangi", "Deoni", "Gir", 
-    "Guernsey", "Hallikar", "Hariana", "Holstein_Friesian", "Jaffrabadi", 
-    "Jersey", "Kangayam", "Kankrej", "Kasargod", "Kenkatha", 
-    "Kherigarh", "Khillari", "Krishna_Valley", "Malnad_gidda", "Mehsana", 
-    "Murrah", "Nagori", "Nagpuri", "Nili_Ravi", "Nimari", 
-    "Ongole", "Pulikulam", "Rathi", "Red_Dane", "Red_Sindhi", 
-    "Sahiwal", "Surti", "Tharparkar", "Toda", "Umblachery", 
-    "Vechur"
-]
+@st.cache_data
+def load_breed_labels():
 
+    classes_path = hf_hub_download(
+        repo_id="ujjwal75/indian-bovine-breeds-model",
+        filename="classes.json"
+    )
+
+    with open(classes_path, "r", encoding="utf-8") as f:
+        classes = json.load(f)
+
+    # Handle either a list or dictionary format
+    if isinstance(classes, list):
+        return classes
+
+    if isinstance(classes, dict):
+        # If mapping is index -> class
+        try:
+            return [
+                classes[str(i)]
+                for i in range(len(classes))
+            ]
+        except KeyError:
+            # If mapping is class -> index
+            return [
+                label
+                for label, index in sorted(
+                    classes.items(),
+                    key=lambda x: x[1]
+                )
+            ]
+
+    raise ValueError("Unsupported classes.json format")
+
+breed_labels = load_breed_labels()
 # ============ BREED INFO ============
 breed_info_raw = {
     "gir": {
@@ -413,7 +437,7 @@ GOOD MILK YIELD IN ARID CONDITIONS""",
 }
 
 # ============ IMAGE TRANSFORM ============
-IMG_SIZE = 300
+IMG_SIZE = 224
 transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.ToTensor(),
@@ -421,34 +445,62 @@ transform = transforms.Compose([
 ])
 
 # ============ MODEL LOADING ============
+# ============ MODEL LOADING ============
+
 @st.cache_resource
 def load_model():
+
     try:
         with st.spinner(get_translation("model_loading", language)):
-            model = timm.create_model("resnet50", pretrained=False, num_classes=len(breed_labels))
+
+            # Download model from Hugging Face
             checkpoint_path = hf_hub_download(
                 repo_id="ujjwal75/indian-bovine-breeds-model",
                 filename="Indian_bovine_finetuned_model.pth"
             )
-            
-            if not os.path.exists(checkpoint_path):
-                st.warning(get_translation("model_error", language))
-                return None
-                
-            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-            
-            if 'model_state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['model_state_dict'])
-            elif 'state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['state_dict'])
+
+            # Create ResNet-50 with 40 output classes
+            model = timm.create_model(
+                "resnet50",
+                pretrained=False,
+                num_classes=len(breed_labels)
+            )
+
+            # Load trained weights
+            checkpoint = torch.load(
+                checkpoint_path,
+                map_location=device,
+                weights_only=False
+            )
+
+            # Handle different checkpoint formats
+            if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+
+                model.load_state_dict(
+                    checkpoint["model_state_dict"]
+                )
+
+            elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+
+                model.load_state_dict(
+                    checkpoint["state_dict"]
+                )
+
             else:
+
                 model.load_state_dict(checkpoint)
-                
+
             model.to(device)
             model.eval()
+
             return model
+
     except Exception as e:
-        st.warning(f"Model loading error: {str(e)[:100]}")
+
+        st.error(
+            f"Model loading error: {str(e)}"
+        )
+
         return None
 
 model = load_model()
